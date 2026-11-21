@@ -10,7 +10,7 @@ from combat import (aim_at, aim_err, closest_approach, d2, d3, lead, mortar_land
                     mortar_tof, wrap, yaw_to)
 from world import PathSearch, World
 
-NAME = "survivor-farm"
+NAME = "survivor-farm-gunlaser"
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "gun_rate", "gun_damage", "laser_damage", "lightning_efficiency",
     "laser_charge", "lightning_range", "gyros", "gun_mag", "servos", "sensors", "capacitor", "reactor",
@@ -18,7 +18,9 @@ UPGRADE_PRIORITY = [
     "laser_pierce",
 ]
 # v2: either slot may be swapped, so the gun goes once two better weapons are at hand
-WEAPON_VALUE = {"lightning": 3.5, "laser": 3.0, "gun": 1.0, "mortar": 0.8}
+# v9: copy the best house bot (astra-finalist ends gun + laser in 10/12 live matches, drops lightning for a
+# laser; the gun does 52% of all mech damage): never drop the gun; second slot laser > lightning > mortar
+WEAPON_VALUE = {"laser": 3.0, "lightning": 2.5, "mortar": 1.0, "gun": 99.0}
 LOUD = {"gun", "laser", "lightning", "mortar", "laser_charge", "step", "boost", "jet", "reload"}
 BUDGET_S = 0.016  # our own per-decision compute cap (the server allows 50 ms)
 
@@ -196,8 +198,8 @@ class Bot:
         for w in self.me["weapons"]:
             if w is None:
                 vals.append(0.0)
-            elif w.get("charge", 0) > 0:
-                vals.append(99.0)
+            elif w.get("charge", 0) > 0 or w["kind"] == "gun":
+                vals.append(99.0)  # v9: the gun is never given up
             else:
                 vals.append(WEAPON_VALUE.get(w["kind"], 0.0))
         i = min(range(len(vals)), key=lambda k: vals[k])
