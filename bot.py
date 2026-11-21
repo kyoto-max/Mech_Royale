@@ -29,7 +29,7 @@ class Bot:
     def __init__(self, hello):
         self.cfg = hello["config"]
         self.me_id = hello["slot"]
-        self.rng = random.Random(hello.get("seed", 0) + 7919)  # v11: only change vs v4 (reshuffle test)
+        self.rng = random.Random(hello.get("seed", 0))
         self.world = None
         try:
             self.world = World(hello["map"]["dir"], self.cfg["mech"])
