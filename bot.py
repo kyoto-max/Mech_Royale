@@ -13,7 +13,7 @@ from world import PathSearch, World
 # ---- the one line to change per submission -------------------------------------------------
 # survivor: v1 (scored 3.6)   ghost: never start fights, stay silent   edge: ghost, holding the
 # inside edge of the next circle   third: ghost + finish off weakened mechs
-STRATEGY = "ghost"
+STRATEGY = "survivor"
 PROFILES = {
     "survivor": dict(only_attackers=False, engage_range=260, farm=True, drops=True, silent=False, hold="ring", opportunist=False),
     "ghost":    dict(only_attackers=True, engage_range=40, farm=False, drops=False, silent=True, hold="ring", opportunist=False),
