@@ -16,7 +16,7 @@ from world import PathSearch, World
 # survivor: v1 (scored 3.6)   ghost: never start fights, stay silent   edge: ghost, holding the
 # inside edge of the next circle   third: ghost + finish off weakened mechs
 # phantom: hide in offline-computed low-exposure spots (tools/exposure.py)
-STRATEGY = "phantom"
+STRATEGY = "duelist"
 PROFILES = {
     "survivor": dict(only_attackers=False, engage_range=260, farm=True, drops=True, silent=False, hold="ring", opportunist=False),
     "ghost":    dict(only_attackers=True, engage_range=40, farm=False, drops=False, silent=True, hold="ring", opportunist=False),
@@ -24,18 +24,20 @@ PROFILES = {
     "third":    dict(only_attackers=True, engage_range=40, farm=False, drops=False, silent=True, hold="ring", opportunist=True),
     "phantom":  dict(only_attackers=True, engage_range=45, farm=False, drops=False, silent=False, hold="hide", opportunist=False,
                      loot_reach=35, stealth=1.0),
+    # practice = us vs a 15-bot squad that never fights itself: score ~ kills. Fight hunters 1-on-1, not idle bots.
+    "duelist":  dict(only_attackers=True, engage_range=45, farm=True, drops=True, silent=False, hold="ring", opportunist=True,
+                     hunt_detect=True, back_off=False, heal_hide=True),
 }
 PROF = PROFILES[STRATEGY]
 NAME = ("survivor-" + STRATEGY)[:32]
 UPGRADE_PRIORITY = [
-    "plating", "armor", "nanites", "gun_rate", "gun_damage", "laser_damage", "lightning_efficiency",
-    "laser_charge", "lightning_range", "gyros", "gun_mag", "servos", "sensors", "capacitor", "reactor",
-    "jets", "gun_velocity", "mortar_reload", "lightning_chain", "mortar_velocity", "mortar_splash",
-    "laser_pierce",
+    "plating", "armor", "lightning_efficiency", "nanites", "laser_damage", "gun_rate", "gun_damage",
+    "capacitor", "reactor", "laser_charge", "lightning_range", "gyros", "gun_mag", "lightning_chain", "servos",
+    "sensors", "jets", "gun_velocity", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce",
 ]
 # gun ~100 dps sustained; lightning 240 dps auto-aimed <45 m; laser 315 hitscan to 280 m. Both slots may
 # hold anything (the gun can be dropped), so laser + lightning is the target loadout.
-WEAPON_VALUE = {"lightning": 3.0, "laser": 3.0, "mortar": 1.5, "gun": 1.0}
+WEAPON_VALUE = {"lightning": 3.5, "laser": 3.0, "mortar": 1.5, "gun": 1.0}
 LOUD = {"gun", "laser", "lightning", "mortar", "laser_charge", "step", "boost", "jet", "reload"}
 BUDGET_S = 0.012  # our own per-decision compute cap (the server allows 50 ms)
 
@@ -304,6 +306,11 @@ class Bot:
         if out > 0 and (time_left < travel or zone["shrink_start"] - t < travel):
             return self._ring_point(c, r, d), time_left < travel * 0.7, "rotate"
 
+        if PROF.get("heal_hide") and self.hp_frac < 0.72 and t - self.last_damage_t < 25 and zone["next_radius"] > 30:
+            spot = self._cover_near(zone)
+            if spot is not None:
+                return spot, False, "heal"
+
         if PROF["hold"] == "hide" and zone["next_radius"] > 40:
             self.goal_exact = False
             loot = self._loot_goal(obs, zone)
@@ -352,6 +359,42 @@ class Bot:
             if s < bs:
                 best, bs = h, s
         self.hide, self.hide_key = best, key
+        return best
+
+    def _cover_near(self, zone):
+        """Lowest-exposure open cell within ~40 m (inside the zone): break line of sight and regenerate."""
+        w = self.world
+        if w is None or w.exposure is None:
+            return None
+        c = getattr(self, "_cover", None)
+        if c is not None and self.t - c[2] < 6 and d2(c, self.pos) < 45:
+            return (c[0], c[1])
+        k0 = w.cell(self.pos[0], self.pos[1])
+        if k0 < 0:
+            return None
+        j0, i0 = divmod(k0, w.nx)
+        best, bs = None, 1e18
+        for dj in range(-20, 21, 2):
+            for di in range(-20, 21, 2):
+                i, j = i0 + di, j0 + dj
+                if not (0 <= i < w.nx and 0 <= j < w.ny):
+                    continue
+                k = j * w.nx + i
+                if w.oob[k] or w.surf[k] - w.ground[k] > 1.5:
+                    continue
+                p = w.center(k)
+                if not self._in_zone_at(p, zone, 8):
+                    continue
+                # threats: prefer spots away from where the damage came from
+                s = w.exposure[k] + d2(p, self.pos) * 0.4
+                for tt, bear, wgt in self.threats[-6:]:
+                    away = math.cos(wrap(math.atan2(p[1] - self.pos[1], p[0] - self.pos[0]) - bear))
+                    s += 8.0 * away * wgt
+                if s < bs:
+                    best, bs = p, s
+        if best is None:
+            return None
+        self._cover = (best[0], best[1], self.t)
         return best
 
     def _hide_bad(self, h, enemies, obs):
@@ -473,7 +516,17 @@ class Bot:
             return True
         if PROF["opportunist"] and dist < 130 and self.hp_frac > 0.6:
             hpf = e.get("hp", 1400) / max(1.0, e.get("max_hp", 1400))
-            return hpf < 0.5
+            if hpf < 0.5:
+                return True
+        if PROF.get("hunt_detect") and dist < 170:
+            # a hunter: moving toward us (or aiming at us) is coming for the fight anyway
+            v = e.get("vel", [0, 0, 0])
+            dx, dy = self.pos[0] - e["pos"][0], self.pos[1] - e["pos"][1]
+            n = math.hypot(dx, dy) or 1.0
+            closing = (v[0] * dx + v[1] * dy) / n
+            aiming = abs(wrap(e.get("aim", [0, 0])[0] - math.atan2(dy, dx))) < 0.15
+            if closing > 3.0 or (aiming and dist < 120):
+                return True
         return False
 
     def _choose_target(self, enemies):
@@ -628,7 +681,7 @@ class Bot:
         else:
             want = 55.0
         retreat = (self.hp_frac < 0.35 and ehp > self.hp_frac + 0.1) or (self.hp_frac < 0.55 and ehp > 0.8 and dist > 40)
-        if PROF["only_attackers"] and dist > 40 and not (PROF["opportunist"] and ehp < 0.5 and self.hp_frac > 0.6):
+        if PROF["only_attackers"] and PROF.get("back_off", True) and dist > 40 and not (PROF["opportunist"] and ehp < 0.5 and self.hp_frac > 0.6):
             retreat = True  # don't trade at range: back off out of sight, still facing it
         zone_urgent = why in ("zone!",)
         if self.t > self.strafe_flip_t:
