@@ -10,7 +10,7 @@ from combat import (aim_at, aim_err, closest_approach, d2, d3, lead, mortar_land
                     mortar_tof, wrap, yaw_to)
 from world import PathSearch, World
 
-NAME = "survivor-farm-heal"
+NAME = "survivor-farm"
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "gun_rate", "gun_damage", "laser_damage", "lightning_efficiency",
     "laser_charge", "lightning_range", "gyros", "gun_mag", "servos", "sensors", "capacitor", "reactor",
@@ -251,14 +251,6 @@ class Bot:
         if out > 0 and (time_left < travel or zone["shrink_start"] - t < travel):
             return self._ring_point(c, r, d), time_left < travel * 0.7, "rotate"
 
-        # v7: hurt and nobody in sight: stop at nearby cover and regenerate instead of walking into the next hunter
-        if self.hp_frac < 0.6:
-            self.healing = True
-        if enemies or self.hp_frac >= 0.9:
-            self.healing = False
-        if getattr(self, "healing", False):
-            return self._heal_spot(zone), False, "heal"
-
         # supply drop if uncontested and in reach
         drop = self._drop_goal(obs, enemies)
         if drop is not None:
@@ -344,38 +336,6 @@ class Bot:
                 if dd < bd:
                     bestp, bd = p, dd
         return bestp
-
-    def _heal_spot(self, zone):
-        """Best wall-hugging ground cell within ~24 m, away from where recent damage came from (cached 8 s)."""
-        hs = getattr(self, "_heal", None)
-        if hs is not None and self.t - hs[2] < 8:
-            return (hs[0], hs[1])
-        pos = self.pos
-        w = self.world
-        best, bs = (pos[0], pos[1]), -1e18
-        if w is not None:
-            k0 = w.cell(pos[0], pos[1])
-            if k0 >= 0:
-                j0, i0 = divmod(k0, w.nx)
-                for dj in range(-12, 13, 2):
-                    for di in range(-12, 13, 2):
-                        i, j = i0 + di, j0 + dj
-                        if not (0 <= i < w.nx and 0 <= j < w.ny):
-                            continue
-                        k = j * w.nx + i
-                        if w.oob[k] or w.surf[k] - w.ground[k] > 1.5:
-                            continue
-                        p = w.center(k)
-                        if not self._in_zone_at(p, zone, 8):
-                            continue
-                        s = min(w.cover_score(k), 8) * 3.0 - d2(p, pos) * 0.2
-                        for tt, bear, wgt in self.threats[-6:]:
-                            toward = math.cos(wrap(math.atan2(p[1] - pos[1], p[0] - pos[0]) - bear))
-                            s -= 6.0 * toward * wgt
-                        if s > bs:
-                            best, bs = p, s
-        self._heal = (best[0], best[1], self.t)
-        return best
 
     def _ring_point(self, c, r, d):
         if d < 1e-3:
