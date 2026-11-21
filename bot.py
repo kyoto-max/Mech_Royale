@@ -10,7 +10,18 @@ from combat import (aim_at, aim_err, closest_approach, d2, d3, lead, mortar_land
                     mortar_tof, wrap, yaw_to)
 from world import PathSearch, World
 
-NAME = "survivor"
+# ---- the one line to change per submission -------------------------------------------------
+# survivor: v1 (scored 3.6)   ghost: never start fights, stay silent   edge: ghost, holding the
+# inside edge of the next circle   third: ghost + finish off weakened mechs
+STRATEGY = "ghost"
+PROFILES = {
+    "survivor": dict(only_attackers=False, engage_range=260, farm=True, drops=True, silent=False, hold="ring", opportunist=False),
+    "ghost":    dict(only_attackers=True, engage_range=40, farm=False, drops=False, silent=True, hold="ring", opportunist=False),
+    "edge":     dict(only_attackers=True, engage_range=40, farm=False, drops=False, silent=True, hold="edge", opportunist=False),
+    "third":    dict(only_attackers=True, engage_range=40, farm=False, drops=False, silent=True, hold="ring", opportunist=True),
+}
+PROF = PROFILES[STRATEGY]
+NAME = ("survivor-" + STRATEGY)[:32]
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "gun_rate", "gun_damage", "laser_damage", "lightning_efficiency",
     "laser_charge", "lightning_range", "gyros", "gun_mag", "servos", "sensors", "capacitor", "reactor",
@@ -43,6 +54,9 @@ class Bot:
         self.memory = {}          # mech id -> last seen info (our own long memory)
         self.threats = []         # (t, bearing, weight)
         self.hit_by = {}          # mech id -> last t it damaged us
+        self.engaged = {}         # mech id -> last t we shot at it
+        self.hurry = False
+        self.climb = False
         self.last_damage_t = -99.0
         self.last_deal_t = -99.0
         self.search = None
@@ -62,6 +76,27 @@ class Bot:
 
     # ======================================================================== main
     def act(self, obs):
+        try:
+            return self._act(obs)
+        except Exception:
+            self.errors = getattr(self, "errors", 0) + 1
+            if self.errors <= 5 or self.errors % 200 == 0:
+                import traceback
+                mf.log(f"act failed ({self.errors}) at t={obs.get('t')}:\n{traceback.format_exc()}")
+            return self._fallback(obs)
+
+    def _fallback(self, obs):
+        """Bare-bones safe action: walk toward the next zone center, keep aim, never fire."""
+        try:
+            pos = obs["self"]["pos"]
+            c = obs["zone"]["next_center"]
+            d = math.hypot(c[0] - pos[0], c[1] - pos[1])
+            mv = [0.0, 0.0] if d < 10 else [(c[0] - pos[0]) / d, (c[1] - pos[1]) / d]
+            return {"move": mv, "boost": not obs["self"].get("in_zone", True), "fire": [False, False]}
+        except Exception:
+            return {"move": [0.0, 0.0]}
+
+    def _act(self, obs):
         t0 = time.perf_counter()
         self.deadline = t0 + BUDGET_S
         me = obs["self"]
@@ -94,6 +129,8 @@ class Bot:
         fire = [False, False]
         if target is not None:
             aim, fire = self._engage(target, fire)
+            if any(fire):
+                self.engaged[target["id"]] = t
             move, boost, why = self._combat_move(target, move, boost, obs, why)
         else:
             # farm crates / NPCs when quiet and healthy
@@ -206,6 +243,8 @@ class Bot:
         c, r = zone["next_center"], zone["next_radius"]
         if r <= 30:
             return c, max(1.5, r * 0.35)
+        if PROF["hold"] == "edge":
+            return c, max(r * 0.62, r - max(15.0, 0.1 * r))
         return c, r * 0.62
 
     def _in_zone_at(self, p, zone, margin=0.0):
@@ -220,6 +259,8 @@ class Bot:
         out = max(0.0, d - r)
         time_left = zone["shrink_end"] - t
         travel = out / self.walk * 1.4 + 8.0
+        quiet = self.cfg["sound"].get("step_speed", 5) * 0.9
+        self.hurry = out > 0 and time_left < out / quiet * 1.3 + 10
         if not self.me["in_zone"]:
             return self._ring_point(c, r, d), True, "zone!"
         if out > 0 and (time_left < travel or zone["shrink_start"] - t < travel):
@@ -243,7 +284,7 @@ class Bot:
     def _ring_point(self, c, r, d):
         if d < 1e-3:
             return (c[0], c[1])
-        f = max(0.0, (r * 0.85)) / d
+        f = max(0.0, r * (0.92 if PROF["hold"] == "edge" else 0.85)) / d
         return (c[0] + (self.pos[0] - c[0]) * f, c[1] + (self.pos[1] - c[1]) * f)
 
     def _hold_point(self, c, r):
@@ -279,6 +320,8 @@ class Bot:
         return spot
 
     def _drop_goal(self, obs, enemies):
+        if not PROF["drops"]:
+            return None
         for dr in obs.get("drops", []):
             p = dr["pos"]
             dist = d2(p, self.pos)
@@ -324,11 +367,24 @@ class Bot:
         return best
 
     # ======================================================================== targeting
+    def _eligible(self, e, dist):
+        """Whether this profile is willing to shoot at mech e."""
+        if not PROF["only_attackers"]:
+            return dist <= PROF["engage_range"]
+        if self.t - self.hit_by.get(e["id"], -99) < 5.0 or dist <= PROF["engage_range"]:
+            return True
+        if self.t - self.engaged.get(e["id"], -99) < 3.0:
+            return True
+        if PROF["opportunist"] and dist < 130 and self.hp_frac > 0.6:
+            hpf = e.get("hp", 1400) / max(1.0, e.get("max_hp", 1400))
+            return hpf < 0.5
+        return False
+
     def _choose_target(self, enemies):
         best, bs = None, -1e9
         for e in enemies:
             dist = d3(e["pos"], self.pos)
-            if dist > 260:
+            if dist > 260 or not self._eligible(e, dist):
                 continue
             hpf = e.get("hp", 1400) / max(1.0, e.get("max_hp", 1400))
             s = -dist - hpf * 80
@@ -347,6 +403,12 @@ class Bot:
         return (e["pos"][0], e["pos"][1], e["pos"][2] + self.cfg["mech"]["height"] * 0.5 * sc)
 
     def _farm_target(self, obs, npcs):
+        # always answer a drone that is shooting us
+        for n in npcs:
+            if self.t - self.hit_by.get(n["id"], -99) < 4.0 and d3(n["pos"], self.pos) < 90:
+                return n
+        if not PROF["farm"]:
+            return None
         # don't spoil out-of-combat regen when hurt
         if self.hp_frac < 0.6 or self.t - self.last_damage_t < 2.5 and not npcs:
             return None
@@ -432,7 +494,7 @@ class Bot:
             s = wp["stats"]
             if k == "gun":
                 fire[i] = (has_los and gun_aim is not None and dist < s["range"] and wp.get("ammo", 1) > 0
-                           and wp.get("reload", 0) == 0 and aim_err(actual, gun_aim) < tol * 1.3)
+                           and wp.get("reload", 0) == 0 and aim_err(actual, gun_aim) < max(tol * 1.8, 0.02))
             elif k == "lightning":
                 cone = math.radians(s.get("cone_deg", 30)) * 0.5
                 fire[i] = (has_los and dist < s["range"] - 1.5 and abs(wrap(direct[0] - actual[0])) < cone * 0.8
@@ -470,6 +532,8 @@ class Bot:
         else:
             want = 55.0
         retreat = (self.hp_frac < 0.35 and ehp > self.hp_frac + 0.1) or (self.hp_frac < 0.55 and ehp > 0.8 and dist > 40)
+        if PROF["only_attackers"] and dist > 40 and not (PROF["opportunist"] and ehp < 0.5 and self.hp_frac > 0.6):
+            retreat = True  # don't trade at range: back off out of sight, still facing it
         zone_urgent = why in ("zone!",)
         if self.t > self.strafe_flip_t:
             self.strafe = -self.strafe
@@ -558,7 +622,9 @@ class Bot:
                     mf.draw.line([P[a][0], P[a][1], pos[2] + 1], [P[a + 1][0], P[a + 1][1], pos[2] + 1], "#40ff80")
         yaw = yaw_to(pos, target)
         speed = 1.0 if dist > 4 else 0.6
-        boost = urgent or (dist > 90 and self.me["energy"] > 70)
+        if PROF["silent"] and not urgent and not self.hurry:
+            speed = min(speed, self.cfg["sound"].get("step_speed", 5) * 0.9 / max(1.0, self.st.get("walk_speed", self.walk)))
+        boost = urgent or (not PROF["silent"] and dist > 90 and self.me["energy"] > 70)
         return (math.cos(yaw) * speed, math.sin(yaw) * speed), boost
 
     def _unstick(self, move, boost):
