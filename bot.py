@@ -28,7 +28,9 @@ UPGRADE_PRIORITY = [
     "jets", "gun_velocity", "mortar_reload", "lightning_chain", "mortar_velocity", "mortar_splash",
     "laser_pierce",
 ]
-WEAPON_VALUE = {"lightning": 3, "laser": 3, "mortar": 1, "gun": 0}
+# gun ~100 dps sustained; lightning 240 dps auto-aimed <45 m; laser 315 hitscan to 280 m. Both slots may
+# hold anything (the gun can be dropped), so laser + lightning is the target loadout.
+WEAPON_VALUE = {"lightning": 3.0, "laser": 3.0, "mortar": 1.5, "gun": 1.0}
 LOUD = {"gun", "laser", "lightning", "mortar", "laser_charge", "step", "boost", "jet", "reload"}
 BUDGET_S = 0.016  # our own per-decision compute cap (the server allows 50 ms)
 
@@ -55,6 +57,8 @@ class Bot:
         self.threats = []         # (t, bearing, weight)
         self.hit_by = {}          # mech id -> last t it damaged us
         self.engaged = {}         # mech id -> last t we shot at it
+        self.known = {}           # weapon pickup id -> {kind, pos}: they never despawn, so remember them
+        self.goal_exact = False
         self.hurry = False
         self.climb = False
         self.last_damage_t = -99.0
@@ -120,6 +124,7 @@ class Bot:
         target = self._choose_target(enemies)
 
         # ---- where to go
+        self.goal_exact = False
         goal, urgent, why = self._strategic_goal(obs, enemies)
         move, boost = self._navigate(goal, urgent)
         climb = self.climb
@@ -190,6 +195,14 @@ class Bot:
                 self.last_deal_t = t
             elif ty == "kill":
                 self.memory.pop(e.get("target"), None)
+            elif ty == "took" or (ty == "take_failed" and e.get("reason") == "gone"):
+                self.known.pop(e.get("id"), None)
+        vis = set()
+        for p in obs["pickups"]:
+            vis.add(p["id"])
+            self.known[p["id"]] = {"kind": p["kind"], "pos": p["pos"]}
+        for k in [k for k, v in self.known.items() if k not in vis and d2(v["pos"], self.pos) < 12]:
+            del self.known[k]  # we're standing next to where it was and don't see it: taken
         for s in obs["sounds"]:
             if s["kind"] in LOUD and s["dist"] in ("near", "mid"):
                 self.threats.append((t - s.get("age", 0), s["bearing"], 2.0 if s["dist"] == "near" else 1.0))
@@ -208,35 +221,43 @@ class Bot:
     def _held(self):
         return [w["kind"] if w else None for w in self.me["weapons"]]
 
+    def _worst_slot(self):
+        """(slot index, value) of the weakest slot we'd give up; empty slots are worth 0."""
+        ws = self.me["weapons"]
+        vals = []
+        for w in ws:
+            if w is None:
+                vals.append(0.0)
+            elif w.get("charge", 0) > 0:
+                vals.append(99.0)  # can't drop a charging laser
+            else:
+                vals.append(WEAPON_VALUE.get(w["kind"], 0.0))
+        i = min(range(len(vals)), key=lambda k: vals[k])
+        return i, vals[i]
+
     def _loot_take(self, obs, act):
         held = self._held()
         reach = self.cfg["loot"]["pickup_radius"]
-        best = None
+        slot, worst = self._worst_slot()
+        best, bg = None, 0.0
         for p in obs["pickups"]:
-            if p["kind"] in held or WEAPON_VALUE.get(p["kind"], 0) <= 0:
+            if p["kind"] in held:
                 continue
             if d2(p["pos"], self.pos) > reach - 0.3 or abs(p["pos"][2] - self.pos[2]) > 3.8:
                 continue
-            if best is None or WEAPON_VALUE[p["kind"]] > WEAPON_VALUE[best["kind"]]:
-                best = p
+            gain = WEAPON_VALUE.get(p["kind"], 0) - worst
+            if gain > bg:
+                best, bg = p, gain
         if best is None:
             return
-        slot1 = self.me["weapons"][1]
-        if slot1 is None:
-            act["take"] = best["id"]
-        elif WEAPON_VALUE[best["kind"]] > WEAPON_VALUE.get(slot1["kind"], 0) and slot1.get("charge", 0) == 0:
-            act["take"] = best["id"]
-            act["drop"] = 1
+        act["take"] = best["id"]
+        if self.me["weapons"][slot] is not None:
+            act["drop"] = slot
 
     def _want_pickup(self, p):
-        held = self._held()
-        if p["kind"] in held:
+        if p["kind"] in self._held():
             return 0
-        v = WEAPON_VALUE.get(p["kind"], 0)
-        slot1 = self.me["weapons"][1]
-        if slot1 is None:
-            return v
-        return v if v > WEAPON_VALUE.get(slot1["kind"], 0) else 0
+        return max(0.0, WEAPON_VALUE.get(p["kind"], 0) - self._worst_slot()[1])
 
     def _safe_ring(self, zone):
         """(center, radius) we want to stand in: the next circle with margin."""
@@ -272,6 +293,7 @@ class Bot:
             return drop, False, "drop"
 
         # loot near us (weapons, cubes, crates) that is inside the safe area
+        self.goal_exact = False
         loot = self._loot_goal(obs, zone)
         if loot is not None:
             return loot, False, "loot"
@@ -342,18 +364,26 @@ class Bot:
         best, bs = None, -1e9
         pos = self.pos
         w = self.world
-        for p in obs["pickups"]:
+        armed = sum(1 for k in self._held() if k in ("laser", "lightning"))
+        reach = 260 if armed < 2 and self.t < 150 else 130
+        closing = zone["shrink_start"] - self.t < 15
+        for p in self.known.values():
             v = self._want_pickup(p)
             if v <= 0:
                 continue
-            if w is not None and p["pos"][2] - w.ground_h(p["pos"][0], p["pos"][1]) > 3:
-                continue  # on a roof: not worth the climb
-            dist = d2(p["pos"], pos)
-            if dist > 120 or not self._in_zone_at(p["pos"], zone, 15):
+            pp = p["pos"]
+            up = pp[2] - w.ground_h(pp[0], pp[1]) if w is not None else 0.0
+            if up > 25:
+                continue  # roof too high to jet onto with a safe energy margin
+            dist = d2(pp, pos) + (25 if up > 3 else 0)
+            if dist > reach or not self._in_zone_at(pp, zone, 15):
                 continue
-            s = v * 40 - dist
+            if closing and d2(pp, zone["next_center"]) > zone["next_radius"] - 10:
+                continue
+            s = v * 70 - dist
             if s > bs:
-                best, bs = (p["pos"][0], p["pos"][1]), s
+                best, bs = (pp[0], pp[1]), s
+                self.goal_exact = up > 3
         cubes_now = self.me["cubes"]
         for cb in obs["cubes"]:
             dist = d2(cb["pos"], pos)
@@ -364,6 +394,7 @@ class Bot:
             s = (60 if cubes_now < 10 else 25) - dist
             if s > bs:
                 best, bs = (cb["pos"][0], cb["pos"][1]), s
+                self.goal_exact = False
         return best
 
     # ======================================================================== targeting
@@ -583,7 +614,7 @@ class Bot:
             if self.path and self.path_idx < len(self.path) and d2(self.path[self.path_idx], pos) > 14:
                 replan = True
             if replan and (self.search is None or self.search.done):
-                self.search = PathSearch(w, (pos[0], pos[1]), goal)
+                self.search = PathSearch(w, (pos[0], pos[1]), goal, exact=self.goal_exact)
                 self.path_goal = goal
                 self.path_t = self.t
             if self.search is not None and not self.search.done:

@@ -244,12 +244,14 @@ class World:
 class PathSearch:
     """Weighted A* on the 2 m grid that can be advanced a slice at a time across decisions."""
 
-    def __init__(self, world, start, goal, weight=1.4, max_exp=60000):
+    def __init__(self, world, start, goal, weight=1.4, max_exp=60000, exact=False):
         self.w = world
         self.start = world.nearest_open(world.cell(*start), 6)
         if self.start < 0:
             self.start = world.cell(*start)
-        self.goal = world.nearest_open(world.cell(*goal))
+        gk = world.cell(*goal)
+        # exact: the goal may be a roof (loot up there); otherwise snap to open ground
+        self.goal = gk if (exact and gk >= 0 and not world.oob[gk]) else world.nearest_open(gk)
         self.goal_xy = goal
         self.weight = weight
         self.max_exp = max_exp
