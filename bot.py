@@ -10,14 +10,15 @@ from combat import (aim_at, aim_err, closest_approach, d2, d3, lead, mortar_land
                     mortar_tof, wrap, yaw_to)
 from world import PathSearch, World
 
-NAME = "survivor-seek"
+NAME = "survivor-seek-arm"
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "gun_rate", "gun_damage", "laser_damage", "lightning_efficiency",
     "laser_charge", "lightning_range", "gyros", "gun_mag", "servos", "sensors", "capacitor", "reactor",
     "jets", "gun_velocity", "mortar_reload", "lightning_chain", "mortar_velocity", "mortar_splash",
     "laser_pierce",
 ]
-WEAPON_VALUE = {"lightning": 3, "laser": 3, "mortar": 1, "gun": 0}
+# v2: either slot may be swapped, so the gun goes once two better weapons are at hand
+WEAPON_VALUE = {"lightning": 3.5, "laser": 3.0, "gun": 1.0, "mortar": 0.8}
 LOUD = {"gun", "laser", "lightning", "mortar", "laser_charge", "step", "boost", "jet", "reload"}
 BUDGET_S = 0.016  # our own per-decision compute cap (the server allows 50 ms)
 
@@ -171,35 +172,42 @@ class Bot:
     def _held(self):
         return [w["kind"] if w else None for w in self.me["weapons"]]
 
+    def _worst_slot(self):
+        """(slot, value) of the weakest weapon we'd give up; empty = 0, a charging laser can't be dropped."""
+        vals = []
+        for w in self.me["weapons"]:
+            if w is None:
+                vals.append(0.0)
+            elif w.get("charge", 0) > 0:
+                vals.append(99.0)
+            else:
+                vals.append(WEAPON_VALUE.get(w["kind"], 0.0))
+        i = min(range(len(vals)), key=lambda k: vals[k])
+        return i, vals[i]
+
     def _loot_take(self, obs, act):
         held = self._held()
         reach = self.cfg["loot"]["pickup_radius"]
-        best = None
+        slot, worst = self._worst_slot()
+        best, bg = None, 0.0
         for p in obs["pickups"]:
-            if p["kind"] in held or WEAPON_VALUE.get(p["kind"], 0) <= 0:
+            if p["kind"] in held:
                 continue
             if d2(p["pos"], self.pos) > reach - 0.3 or abs(p["pos"][2] - self.pos[2]) > 3.8:
                 continue
-            if best is None or WEAPON_VALUE[p["kind"]] > WEAPON_VALUE[best["kind"]]:
-                best = p
+            gain = WEAPON_VALUE.get(p["kind"], 0) - worst
+            if gain > bg:
+                best, bg = p, gain
         if best is None:
             return
-        slot1 = self.me["weapons"][1]
-        if slot1 is None:
-            act["take"] = best["id"]
-        elif WEAPON_VALUE[best["kind"]] > WEAPON_VALUE.get(slot1["kind"], 0) and slot1.get("charge", 0) == 0:
-            act["take"] = best["id"]
-            act["drop"] = 1
+        act["take"] = best["id"]
+        if self.me["weapons"][slot] is not None:
+            act["drop"] = slot  # either slot, the gun included
 
     def _want_pickup(self, p):
-        held = self._held()
-        if p["kind"] in held:
+        if p["kind"] in self._held():
             return 0
-        v = WEAPON_VALUE.get(p["kind"], 0)
-        slot1 = self.me["weapons"][1]
-        if slot1 is None:
-            return v
-        return v if v > WEAPON_VALUE.get(slot1["kind"], 0) else 0
+        return max(0.0, WEAPON_VALUE.get(p["kind"], 0) - self._worst_slot()[1])
 
     def _safe_ring(self, zone):
         """(center, radius) we want to stand in: the next circle with margin."""
