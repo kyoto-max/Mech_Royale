@@ -10,7 +10,7 @@ from combat import (aim_at, aim_err, closest_approach, d2, d3, lead, mortar_land
                     mortar_tof, wrap, yaw_to)
 from world import PathSearch, World
 
-NAME = "survivor-farm"
+NAME = "survivor-farm2"
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "gun_rate", "gun_damage", "laser_damage", "lightning_efficiency",
     "laser_charge", "lightning_range", "gyros", "gun_mag", "servos", "sensors", "capacitor", "reactor",
@@ -299,7 +299,7 @@ class Bot:
         return (c[0], c[1]) if d2(c, pos) > 25 else None
 
     def _farm_goal(self, zone):
-        if self.t > 200 or self.me["cubes"] >= 10 or self.hp_frac < 0.5:
+        if self.t > 270 or self.me["cubes"] >= 21 or self.hp_frac < 0.5:  # v5: was 200 s / 10 cubes
             return None
         pos = self.pos
         best, bd = None, 1e18
