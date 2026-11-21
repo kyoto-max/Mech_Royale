@@ -10,7 +10,7 @@ from combat import (aim_at, aim_err, closest_approach, d2, d3, lead, mortar_land
                     mortar_tof, wrap, yaw_to)
 from world import PathSearch, World
 
-NAME = "survivor-seek-arm"
+NAME = "survivor-seek-arm-focus"
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "gun_rate", "gun_damage", "laser_damage", "lightning_efficiency",
     "laser_charge", "lightning_range", "gyros", "gun_mag", "servos", "sensors", "capacitor", "reactor",
@@ -366,13 +366,18 @@ class Bot:
             if dist > 260:
                 continue
             hpf = e.get("hp", 1400) / max(1.0, e.get("max_hp", 1400))
-            s = -dist - hpf * 80
+            # v3: weakest first (score ~ kills), and stay on the current target until it dies
+            s = -dist * 0.6 - hpf * 220
             if self.t - self.hit_by.get(e["id"], -99) < 3:
                 s += 60
+            if e["id"] == getattr(self, "focus_id", None) and self.t - getattr(self, "focus_t", -99) < 4:
+                s += 90
             if self.world is not None and not self.world.los(self.muzzle, self._center(e)):
                 s -= 70
             if s > bs:
                 best, bs = e, s
+        if best is not None:
+            self.focus_id, self.focus_t = best["id"], self.t
         return best
 
     def _center(self, e):
@@ -506,6 +511,11 @@ class Bot:
             want = 55.0
         retreat = (self.hp_frac < 0.35 and ehp > self.hp_frac + 0.1) or (self.hp_frac < 0.55 and ehp > 0.8 and dist > 40)
         zone_urgent = why in ("zone!",)
+        finish = ehp < 0.3 and not zone_urgent
+        if finish:
+            # v3: a nearly dead target is a kill (= a place): never retreat from it, close in and chase
+            retreat = False
+            want = min(want, 30.0)
         if self.t > self.strafe_flip_t:
             self.strafe = -self.strafe
             self.strafe_flip_t = self.t + self.rng.uniform(0.7, 1.6)
@@ -531,6 +541,8 @@ class Bot:
         nxt = (self.pos[0] + mv[0] * 8, self.pos[1] + mv[1] * 8)
         if d2(nxt, z["center"]) > z["radius"] - 5:
             mv = self._clip_move((mv[0] + (z["center"][0] - self.pos[0]) * 0.05, mv[1] + (z["center"][1] - self.pos[1]) * 0.05))
+        if finish and dist > want:
+            return mv, me["energy"] > 25, why + " finish"
         return mv, boost or (abs(rk) > 0.8 and me["energy"] > 50), why + " fight"
 
     def _clip_move(self, mv):
