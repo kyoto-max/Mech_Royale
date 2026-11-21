@@ -10,12 +10,12 @@ from combat import (aim_at, aim_err, closest_approach, d2, d3, lead, mortar_land
                     mortar_tof, wrap, yaw_to)
 from world import PathSearch, World
 
-NAME = "survivor-farm-zap"
-# v10: v4 ends with lightning + laser most of the time, so feed the lightning (energy and efficiency) first
+NAME = "survivor-farm"
 UPGRADE_PRIORITY = [
-    "plating", "armor", "lightning_efficiency", "lightning_range", "nanites", "capacitor", "laser_damage",
-    "reactor", "lightning_chain", "laser_charge", "gun_damage", "gun_rate", "gyros", "gun_mag", "servos",
-    "sensors", "jets", "gun_velocity", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce",
+    "plating", "armor", "nanites", "gun_rate", "gun_damage", "laser_damage", "lightning_efficiency",
+    "laser_charge", "lightning_range", "gyros", "gun_mag", "servos", "sensors", "capacitor", "reactor",
+    "jets", "gun_velocity", "mortar_reload", "lightning_chain", "mortar_velocity", "mortar_splash",
+    "laser_pierce",
 ]
 # v2: either slot may be swapped, so the gun goes once two better weapons are at hand
 WEAPON_VALUE = {"lightning": 3.5, "laser": 3.0, "gun": 1.0, "mortar": 0.8}
@@ -29,7 +29,7 @@ class Bot:
     def __init__(self, hello):
         self.cfg = hello["config"]
         self.me_id = hello["slot"]
-        self.rng = random.Random(hello.get("seed", 0))
+        self.rng = random.Random(hello.get("seed", 0) + 7919)  # v11: only change vs v4 (reshuffle test)
         self.world = None
         try:
             self.world = World(hello["map"]["dir"], self.cfg["mech"])
