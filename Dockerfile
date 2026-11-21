@@ -1,5 +1,6 @@
-FROM python:3.13.9-slim
+FROM scratch
+ARG TARGETARCH=amd64
 WORKDIR /bot
-COPY brain.pyc world.pyc mechfight.pyc ./
+COPY pilot-${TARGETARCH} /bot/pilot
 USER 65534:65534
-ENTRYPOINT ["python3", "-u", "/bot/brain.pyc"]
+ENTRYPOINT ["/bot/pilot"]
