@@ -16,7 +16,7 @@ from world import PathSearch, World
 # survivor: v1 (scored 3.6)   ghost: never start fights, stay silent   edge: ghost, holding the
 # inside edge of the next circle   third: ghost + finish off weakened mechs
 # phantom: hide in offline-computed low-exposure spots (tools/exposure.py)
-STRATEGY = "duelist"
+STRATEGY = "ambush"
 PROFILES = {
     "survivor": dict(only_attackers=False, engage_range=260, farm=True, drops=True, silent=False, hold="ring", opportunist=False),
     "ghost":    dict(only_attackers=True, engage_range=40, farm=False, drops=False, silent=True, hold="ring", opportunist=False),
@@ -27,6 +27,9 @@ PROFILES = {
     # practice = us vs a 15-bot squad that never fights itself: score ~ kills. Fight hunters 1-on-1, not idle bots.
     "duelist":  dict(only_attackers=True, engage_range=45, farm=True, drops=True, silent=False, hold="ring", opportunist=True,
                      hunt_detect=True, back_off=False, heal_hide=True),
+    # duelist, but let hunters walk into our range: hold cover and wait while they're far
+    "ambush":   dict(only_attackers=True, engage_range=45, farm=True, drops=True, silent=False, hold="ring", opportunist=True,
+                     hunt_detect=True, back_off=False, heal_hide=True, ambush=50.0),
 }
 PROF = PROFILES[STRATEGY]
 NAME = ("survivor-" + STRATEGY)[:32]
@@ -697,6 +700,12 @@ class Bot:
         if zone_urgent:
             mv = (move[0] + perp[0] * 0.5, move[1] + perp[1] * 0.5)
             return self._clip_move(mv), True, why + " fight"
+        if PROF.get("ambush") and dist > PROF["ambush"] and not zone_urgent:
+            spot = self._cover_near(obs["zone"])
+            if spot is not None and d2(spot, self.pos) > 2.0:
+                yaw = yaw_to(self.pos, spot)
+                return (math.cos(yaw), math.sin(yaw)), False, why + " ambush"
+            return (0.0, 0.0), False, why + " ambush"
         rk = max(-1.0, min(1.0, (dist - want) / 25.0))
         mv = (perp[0] + radial[0] * rk, perp[1] + radial[1] * rk)
         mv = self._clip_move(mv)
