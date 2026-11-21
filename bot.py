@@ -10,7 +10,7 @@ from combat import (aim_at, aim_err, closest_approach, d2, d3, lead, mortar_land
                     mortar_tof, wrap, yaw_to)
 from world import PathSearch, World
 
-NAME = "survivor-seek-arm-focus"
+NAME = "survivor-farm"
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "gun_rate", "gun_damage", "laser_damage", "lightning_efficiency",
     "laser_charge", "lightning_range", "gyros", "gun_mag", "servos", "sensors", "capacitor", "reactor",
@@ -42,6 +42,8 @@ class Bot:
         c = self.cfg
         self.walk = c["mech"]["walk_speed"]
         self.memory = {}          # mech id -> last seen info (our own long memory)
+        self.farm_mem = {}        # v4: drone / crate id -> {"pos", "kind"}: crates are static, drones leashed to home
+        self.visited = []         # v4: points we've passed, for exploring
         self.threats = []         # (t, bearing, weight)
         self.hit_by = {}          # mech id -> last t it damaged us
         self.last_damage_t = -99.0
@@ -160,6 +162,22 @@ class Bot:
         self.threats = [x for x in self.threats if t - x[0] < 4.0][-30:]
         for k in [k for k, v in self.memory.items() if t - v["t"] > 30]:
             del self.memory[k]
+        # v4: remember drones and ground-level crates; forget ones we're next to but no longer see
+        vis = set()
+        for m in obs["mechs"]:
+            if m["kind"] == "npc":
+                vis.add(m["id"])
+                self.farm_mem[m["id"]] = {"pos": m["pos"], "kind": "npc"}
+        w = self.world
+        for c in obs["crates"]:
+            if w is not None and c["pos"][2] - w.ground_h(c["pos"][0], c["pos"][1]) > 3:
+                continue
+            vis.add(c["id"])
+            self.farm_mem[c["id"]] = {"pos": c["pos"], "kind": "crate"}
+        for k in [k for k, v in self.farm_mem.items() if k not in vis and d2(v["pos"], self.pos) < 25]:
+            del self.farm_mem[k]
+        if not self.visited or d2(self.visited[-1], self.pos) > 40:
+            self.visited.append((self.pos[0], self.pos[1]))
 
     # ======================================================================== decisions
     def _pick_upgrade(self, offer):
@@ -243,6 +261,11 @@ class Bot:
         if loot is not None:
             return loot, False, "loot"
 
+        # v4: early on (one easy hunter), go farm drones and crates for cubes: +4% HP and damage each
+        farm = self._farm_goal(zone)
+        if farm is not None:
+            return farm, False, "farmrun"
+
         # v1 + seek: nothing to do here, so go where a mech probably is instead of waiting
         prey = self._seek_goal(zone)
         if prey is not None:
@@ -274,6 +297,45 @@ class Bot:
                     return p
         c = zone["next_center"]
         return (c[0], c[1]) if d2(c, pos) > 25 else None
+
+    def _farm_goal(self, zone):
+        if self.t > 200 or self.me["cubes"] >= 10 or self.hp_frac < 0.5:
+            return None
+        pos = self.pos
+        best, bd = None, 1e18
+        for v in self.farm_mem.values():
+            p = v["pos"]
+            if not self._in_zone_at(p, zone, 15):
+                continue
+            dd = d2(p, pos) + (0 if v["kind"] == "npc" else 30)  # drones give 2 cubes, crates 1
+            if dd < bd:
+                best, bd = v, dd
+        if best is not None:
+            p = best["pos"]
+            stand = 60.0 if best["kind"] == "npc" else 25.0
+            dist = d2(p, pos)
+            if dist <= stand + 5:
+                return (pos[0], pos[1])  # in range: hold and let _farm_target shoot
+            f = (dist - stand) / dist
+            return (pos[0] + (p[0] - pos[0]) * f, pos[1] + (p[1] - pos[1]) * f)
+        # nothing known: explore the nearest unvisited part of the zone (100 m grid)
+        c, r = zone["center"], zone["radius"] - 30
+        bestp, bd = None, 1e18
+        step = 100.0
+        n = int(r // step)
+        for i in range(-n, n + 1):
+            for j in range(-n, n + 1):
+                p = (c[0] + i * step, c[1] + j * step)
+                if d2(p, c) > r or any(d2(p, q) < 70 for q in self.visited):
+                    continue
+                if self.world is not None:
+                    k = self.world.cell(*p)
+                    if k < 0 or self.world.oob[k]:
+                        continue
+                dd = d2(p, pos)
+                if dd < bd:
+                    bestp, bd = p, dd
+        return bestp
 
     def _ring_point(self, c, r, d):
         if d < 1e-3:
@@ -366,18 +428,13 @@ class Bot:
             if dist > 260:
                 continue
             hpf = e.get("hp", 1400) / max(1.0, e.get("max_hp", 1400))
-            # v3: weakest first (score ~ kills), and stay on the current target until it dies
-            s = -dist * 0.6 - hpf * 220
+            s = -dist - hpf * 80
             if self.t - self.hit_by.get(e["id"], -99) < 3:
                 s += 60
-            if e["id"] == getattr(self, "focus_id", None) and self.t - getattr(self, "focus_t", -99) < 4:
-                s += 90
             if self.world is not None and not self.world.los(self.muzzle, self._center(e)):
                 s -= 70
             if s > bs:
                 best, bs = e, s
-        if best is not None:
-            self.focus_id, self.focus_t = best["id"], self.t
         return best
 
     def _center(self, e):
@@ -511,11 +568,6 @@ class Bot:
             want = 55.0
         retreat = (self.hp_frac < 0.35 and ehp > self.hp_frac + 0.1) or (self.hp_frac < 0.55 and ehp > 0.8 and dist > 40)
         zone_urgent = why in ("zone!",)
-        finish = ehp < 0.3 and not zone_urgent
-        if finish:
-            # v3: a nearly dead target is a kill (= a place): never retreat from it, close in and chase
-            retreat = False
-            want = min(want, 30.0)
         if self.t > self.strafe_flip_t:
             self.strafe = -self.strafe
             self.strafe_flip_t = self.t + self.rng.uniform(0.7, 1.6)
@@ -541,8 +593,6 @@ class Bot:
         nxt = (self.pos[0] + mv[0] * 8, self.pos[1] + mv[1] * 8)
         if d2(nxt, z["center"]) > z["radius"] - 5:
             mv = self._clip_move((mv[0] + (z["center"][0] - self.pos[0]) * 0.05, mv[1] + (z["center"][1] - self.pos[1]) * 0.05))
-        if finish and dist > want:
-            return mv, me["energy"] > 25, why + " finish"
         return mv, boost or (abs(rk) > 0.8 and me["energy"] > 50), why + " fight"
 
     def _clip_move(self, mv):
