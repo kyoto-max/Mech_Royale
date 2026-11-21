@@ -3,5 +3,5 @@
 FROM python:3.13-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 WORKDIR /bot
-COPY mechfight.py world.py combat.py bot.py ./
+COPY mechfight.py world.py combat.py bot.py exposure.u8 hideouts.json ./
 ENTRYPOINT ["python3", "-u", "/bot/bot.py"]

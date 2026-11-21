@@ -36,7 +36,7 @@ class World:
         slope = math.tan(math.radians(float(mech_cfg.get("max_slope_deg", 50))))
         self.ledge_lim = step_up * 0.95
         self.slope_lim = min(CELL * slope * 0.92, 2.2)
-        self.max_climb = 28.0  # jump + jets: 100 energy climbs ~60 m (protocol §7); keep half in reserve
+        self.max_climb = 40.0  # jump + jets: 100 energy climbs ~60 m (protocol §7); keep a third in reserve
 
         self.gx0, self.gy0 = self.tminx, self.tminy
         self.nx = int((self.tnx - 1) * self.tstep / CELL)
@@ -86,6 +86,15 @@ class World:
                         pen[k] = 1
                         break
         self.pen = pen
+        # offline exposure map (tools/exposure.py): how many viewers can see a mech standing in each cell
+        self.exposure = None
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "exposure.u8"), "rb") as f:
+                e = f.read()
+            if len(e) == n:
+                self.exposure = e
+        except OSError:
+            pass
 
     # ---------------------------------------------------------------- sampling
     def ground_h(self, x, y):
@@ -244,8 +253,9 @@ class World:
 class PathSearch:
     """Weighted A* on the 2 m grid that can be advanced a slice at a time across decisions."""
 
-    def __init__(self, world, start, goal, weight=1.4, max_exp=60000, exact=False):
+    def __init__(self, world, start, goal, weight=1.4, max_exp=60000, exact=False, stealth=0.0):
         self.w = world
+        self.stealth = stealth if world.exposure is not None else 0.0
         self.start = world.nearest_open(world.cell(*start), 6)
         if self.start < 0:
             self.start = world.cell(*start)
@@ -278,6 +288,8 @@ class PathSearch:
         nx, ny = w.nx, w.ny
         g, came, op = self.g, self.came, self.open
         pen = w.pen
+        expo = w.exposure
+        sk = self.stealth / 60.0
         it = 0
         while op:
             it += 1
@@ -305,6 +317,8 @@ class PathSearch:
                 if diag and not (w.passable(k, j * nx + ii, False) and w.passable(k, jj * nx + i, False)):
                     continue
                 ng = gk + c + extra + (1.5 if pen[nk] else 0.0)
+                if sk:
+                    ng += sk * min(expo[nk], 180) * c
                 if ng < g.get(nk, 1e18):
                     g[nk] = ng
                     came[nk] = k
